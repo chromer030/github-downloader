@@ -1,11 +1,29 @@
-- name: Install aria2 and zip
+name: Download from Commit & Save to Repo
+
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  save-file:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install aria2 and zip
         run: sudo apt-get install -y aria2 zip wget
 
       - name: Extract URLs and download files
         run: |
           set -euo pipefail
 
-          # --- helper: download one URL into tmp_downloads/ ---
           download_file() {
             local URL="$1"
             local DEST="tmp_downloads"
@@ -94,3 +112,21 @@
           done
 
           rm -rf tmp_downloads
+
+      - name: Commit & Push
+        run: |
+          set -euo pipefail
+
+          BRANCH="${GITHUB_REF_NAME}"
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add downloads/
+
+          if git diff --cached --quiet; then
+            echo "⚠️ Nothing to commit"
+            exit 0
+          fi
+
+          git commit -m "Add downloaded files [skip ci]"
+          echo "🚀 Pushing to branch: $BRANCH"
+          git push origin "HEAD:$BRANCH"
