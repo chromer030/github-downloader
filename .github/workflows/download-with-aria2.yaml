@@ -102,7 +102,7 @@ jobs:
 
             if [ "$SIZE" -gt "$LIMIT" ]; then
               echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting..."
-              zip -s 90m "downloads/${BASENAME}.zip" --out "downloads/${BASENAME}.zip" "$FILE"
+              zip -s 90m "downloads/${BASENAME}.zip" -j "$FILE"
               PART_COUNT=$(ls downloads/${BASENAME}* 2>/dev/null | wc -l)
               echo "✅ Split into $PART_COUNT parts"
             else
