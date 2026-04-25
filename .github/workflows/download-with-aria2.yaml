@@ -1,24 +1,29 @@
 name: Download from Commit & Save to Repo
+
 on:
   push:
     branches:
       - "**"
+
 jobs:
   save-file:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install aria2
-        run: sudo apt-get install -y aria2
+      - name: Install aria2 and zip
+        run: sudo apt-get install -y aria2 zip
 
       - name: Extract URLs and download files
         run: |
+          set -euo pipefail
+
           MSG=$(git log -1 --pretty=%B)
           echo "Commit message: $MSG"
 
@@ -36,38 +41,53 @@ jobs:
           echo "Mode: $MODE"
           mkdir -p downloads tmp_downloads
 
-          for URL in $URL_LINE; do
-            FILENAME=$(basename "$URL")
-            echo "⬇️ Downloading $URL -> $FILENAME"
+          # FIX: Use readarray to handle URLs with special chars safely
+          readarray -t URLS <<< "$(echo "$URL_LINE" | tr ' ' '\n' | grep -v '^$')"
 
+          for URL in "${URLS[@]}"; do
+            echo "⬇️ Downloading: $URL"
             aria2c \
-              --split=2 \
-              --max-connection-per-server=2 \
-              --min-split-size=90M \
+              --split=4 \
+              --max-connection-per-server=4 \
+              --min-split-size=20M \
+              --max-tries=5 \
+              --retry-wait=10 \
               --dir="tmp_downloads" \
-              "$URL"
+              "$URL" || { echo "❌ Failed to download: $URL"; exit 1; }
           done
 
+          # FIX: Build zip only from actual downloaded files, not the archive itself
           if [ "$MODE" = "zip" ]; then
-            ARCHIVE_NAME="tmp_downloads/archive_$(date +%Y%m%d_%H%M%S).zip"
-            zip -j "$ARCHIVE_NAME" tmp_downloads/*
+            ARCHIVE_NAME="archive_$(date +%Y%m%d_%H%M%S).zip"
+            # Collect files before creating archive
+            mapfile -t DL_FILES < <(find tmp_downloads -maxdepth 1 -type f)
+            if [ ${#DL_FILES[@]} -eq 0 ]; then
+              echo "❌ No files downloaded"
+              exit 1
+            fi
+            zip -j "tmp_downloads/$ARCHIVE_NAME" "${DL_FILES[@]}"
+            # Remove originals, keep only the archive
+            for F in "${DL_FILES[@]}"; do rm -f "$F"; done
           fi
 
-          # Split any zip over 90MB using zip native split (unzip compatible)
+          LIMIT=$((90 * 1024 * 1024))
+
+          # FIX: nullglob-safe loop
+          shopt -s nullglob
           for FILE in tmp_downloads/*; do
             [ -f "$FILE" ] || continue
             SIZE=$(stat -c%s "$FILE")
-            LIMIT=$((90 * 1024 * 1024))
             BASENAME=$(basename "$FILE")
 
             if [ "$SIZE" -gt "$LIMIT" ]; then
-              echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting with zip..."
-              # zip -s creates: file.zip, file.z01, file.z02, ...
-              #zip -s 90m "downloads/${BASENAME}.zip" --out "downloads/${BASENAME}.zip" "$FILE"
-              zip -s 90m "downloads/${BASENAME}.zip" -j "$FILE"
-              echo "✅ Parts: $(ls downloads/${BASENAME}* | wc -l)"
+              echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting..."
+              # FIX: use --out so source file is not touched; output goes to downloads/
+              zip -s 90m "downloads/${BASENAME}.zip" --out "downloads/${BASENAME}.zip" "$FILE"
+              PART_COUNT=$(ls downloads/${BASENAME}* 2>/dev/null | wc -l)
+              echo "✅ Split into $PART_COUNT parts"
             else
               cp "$FILE" "downloads/$BASENAME"
+              echo "✅ Copied: $BASENAME ($(( SIZE / 1024 / 1024 ))MB)"
             fi
           done
 
@@ -75,10 +95,19 @@ jobs:
 
       - name: Commit & Push
         run: |
+          set -euo pipefail
+
           BRANCH="${GITHUB_REF_NAME}"
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add downloads/
-          git commit -m "Add downloaded files from commit [skip ci]" || echo "Nothing to commit"
+
+          # FIX: only push if there's actually something new
+          if git diff --cached --quiet; then
+            echo "⚠️ Nothing to commit — download may have already existed"
+            exit 0
+          fi
+
+          git commit -m "Add downloaded files [skip ci]"
           echo "🚀 Pushing to branch: $BRANCH"
-          git push origin HEAD:$BRANCH
+          git push origin "HEAD:$BRANCH"
